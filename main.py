@@ -1,182 +1,223 @@
-import time
-from time import sleep
 import cv2
 import cvzone
 from cvzone.PoseModule import PoseDetector
 import matplotlib.pyplot as plt
+import mediapipe
 import asyncio
+import os
+from datetime import datetime
 
-video_path = 0
-cap = cv2.VideoCapture(video_path)  # Mở camera
+# Khởi tạo camera
 
-if not cap.isOpened():  # Kiểm tra camera có được mở hay không
+#video_path = "D:/Work/NCKH/NCKH/falltest9.mp4"
+video_path = 'http://100.89.222.35:8000/stream.mjpg'
+cap = cv2.VideoCapture(video_path)
+
+if not cap.isOpened():
     print("Không thể mở camera")
     exit()
 
 # Khởi tạo PoseDetector
 detector = PoseDetector()
-fpsReader = cvzone.FPS()
 
-
-# Tạo danh sách lưu số điểm ảnh và thời gian
+# Khởi tạo danh sách lưu số điểm ảnh và thời gian
 motion_pixels_list = []
 time_list = []
 start_time = 0
 
 # Giới hạn số lượng điểm dữ liệu bạn muốn hiển thị trên biểu đồ
 max_data_points = 100
-data_points_to_remove = 10
 
 # Khởi tạo biến cảnh báo và thời gian bắt đầu cảnh báo
 alert = False
 fall_detect = False
 
+# Khởi tạo thư mục lưu video ghi lại
+output_folder = r"D:\Work\NCKH\Video Record Storage"
+if not os.path.exists(output_folder):
+    os.makedirs(output_folder)
+    
+# Khởi tạo biến cho quá trình ghi video
+record_start_time = None
+video_writer = None
+
+# Tạo một biểu đồ ban đầu và hiển thị nó
+plt.ion()  # Bật chế độ tương tác của Matplotlib
+fig, ax = plt.subplots()
+
+# Khởi tạo biến để lưu số điểm ảnh tối đa của camera
+max_motion_pixels = 0
+max_motion_pixels_printed = False  # Biến boolean để kiểm tra xem đã in ra hay chưa
+
 async def process_frames():
-    global alert
-    global fall_detect
+    global alert #Biến cảnh báo 
+    global fall_detect #Biến thông báo té ngã
+    global max_motion_pixels
+    global max_motion_pixels_printed
+    global record_start_time
+    global video_writer
+    
+    record_start_time = None
+    
     while True:
-        success, img_original = cap.read()
+        success, img_original = cap.read() #Đọc khung hình
 
         if not success:
             print("Không thể đọc khung hình")
             break
+        
+        if not max_motion_pixels_printed:
+            # Tính số điểm ảnh tối đa trong một khung hình
+            max_motion_pixels = img_original.shape[0] * img_original.shape[1]
+            print("Số điểm ảnh tối đa của camera: ", max_motion_pixels)
+            max_motion_pixels_printed = True
 
-        img_display = img_original.copy()
-        img_display = detector.findPose(img_display)
-        lmlist, bboxInfo = detector.findPosition(img_display, bboxWithHands=True)
+        img_display = img_original.copy() #Tạo bản sao từ khung hình gốc
+        img_display = detector.findPose(img_display) #Khung hình bản sao sẽ được sử dụng để thực hiện việc đóng khung cơ thể con người và nhận diện chuyển động
+        lmlist, bboxInfo = detector.findPosition(img_display, bboxWithHands=True) #Đưa việc đóng khung xương và nhận diện chuyển động vào khung hình bản sao
+        
+        # Thông báo khi có người xuất hiện trong khung ảnh
+        if lmlist:
+            print("Người được phát hiện trong khung hình!")
+
+            # Bắt đầu quay video nếu chưa bắt đầu
+            if record_start_time is None:
+                record_start_time = datetime.now()
+                video_name = f"record_{record_start_time.strftime('%Y%m%d%H%M%S')}.avi"
+                video_path = os.path.join(output_folder, video_name)
+                video_writer = cv2.VideoWriter(video_path, cv2.VideoWriter_fourcc(*'XVID'), 20.0, (640, 480))
+
+        else:
+            # Ngừng quay video nếu có người mà không được phát hiện
+            if record_start_time is not None:
+                elapsed_time = datetime.now() - record_start_time
+                print(f"Ngừng quay video. Thời gian ghi: {elapsed_time}")
+                record_start_time = None
+
+                if video_writer is not None:
+                    video_writer.release()
+                    video_writer = None
+         
+        big_frame = cv2.resize(img_display, (img_original.shape[1], img_original.shape[0]))
+
+        # Ghi video nếu đã bắt đầu quay
+        if video_writer is not None:
+            video_writer.write(big_frame)
     
-        ret, frame1 = cap.read()  # Đọc khung hình hiện tại
-        ret, frame2 = cap.read()  # Đọc khung hình tiếp theo
+        ret, frame1 = cap.read() #Đọc khung hình 1
+        ret, frame2 = cap.read() #Đọc khung hình 2
 
-        if not ret:  # Kiểm tra khung hình rỗng
+        if not ret:
             print("Khung hình rỗng")
             break
 
-        frameDiff = cv2.absdiff(frame1, frame2)  # Tính toán khung hình khác biệt giữa hai khung hình liên tiếp
-        grayDiff = cv2.cvtColor(frameDiff, cv2.COLOR_BGR2GRAY)  # Chuyển khung hình khác biệt sang ảnh xám
-        _, colorDiff = cv2.threshold(grayDiff, 50, 255, cv2.THRESH_BINARY)  # Chuyển ảnh xám thành ảnh nhị phân
-        motion_pixels = cv2.countNonZero(colorDiff)  # Đếm số pixel có chuyển động
+        #Chuyển ảnh màu thành ảnh nhị phân
+        frameDiff = cv2.absdiff(frame1, frame2)
+        grayDiff = cv2.cvtColor(frameDiff, cv2.COLOR_BGR2GRAY)
+        _, colorDiff = cv2.threshold(grayDiff, 30, 255, cv2.THRESH_BINARY)
 
-        # Tính thời gian hiện tại
-        current_time = (cv2.getTickCount() - start_time) / cv2.getTickFrequency()
+        motion_pixels = cv2.countNonZero(colorDiff) #Đếm số pixel có giá trị khác 0 (pixel trắng) trong ảnh nhị phân
+
+        current_time = (cv2.getTickCount() - start_time) / cv2.getTickFrequency() #Tính thời gian hiện tại bằng
+        
+        # Tính toán giá trị ngưỡng 
+        threshold = motion_pixels / max_motion_pixels        
     
-        # Thêm số điểm ảnh và thời gian vào danh sách
-        motion_pixels_list.append(motion_pixels)
-        time_list.append(current_time)
+        motion_pixels_list.append(motion_pixels) #Thêm số pixel có sự khác biệt và thời gian tương ứng vào danh sách Motion_pixels_list
+        time_list.append(current_time) #Thêm thời gian hiện tại vào danh sách current time 
     
-        # Giới hạn số lượng điểm dữ liệu trên biểu đồ
-        if len(motion_pixels_list) > max_data_points:
+        if len(motion_pixels_list) > max_data_points: 
             motion_pixels_list.pop(0)
-            time_list.pop(0)
+            time_list.pop(0) #Sử dụng dữ liêu có trong time_list và motion_pixels_list để giới hạn khung hình biểu diễn trong đồ thị điểm ảnh
 
-        # Tạo khung hình lớn để hiển thị các giao diện
-        big_frame = cv2.resize(img_display, (img_original.shape[1], img_original.shape[0]))
+        big_frame = cv2.resize(img_display, (img_original.shape[1], img_original.shape[0])) #Gom tất các khung hình rời rạc lại thành một khung hình chung "Big Frame"
 
+
+        #Xử lí té ngã
         if bboxInfo:
             x, y, w, h = bboxInfo["bbox"]
             length_horizontal = w
             length_vertical = h
-            
-            # Điều chỉnh khoảng cách giữa hai dòng chữ
-            line_spacing = 10  # Điều chỉnh khoảng cách theo mong muốn
+            line_spacing = 10
 
-            # Vẽ thông tin về cạnh bên ngang và bên dọc lên khung hình lớn
-            font_scale = 3  # Điều chỉnh kích thước chữ
-            font_thickness = 3  # Điều chỉnh độ dày của chữ
+            font_scale = 3
+            font_thickness = 3
 
             cv2.putText(big_frame, f"Be Rong: {length_horizontal}px", (10, 30),
                         cv2.FONT_HERSHEY_PLAIN, font_scale, (255, 0, 0), font_thickness)
             cv2.putText(big_frame, f"Chieu Cao: {length_vertical}px", (10, 60 + line_spacing),
                         cv2.FONT_HERSHEY_PLAIN, font_scale, (0, 0, 255), font_thickness)
             
-            # Kiểm tra điều kiện phát hiện té ngã
-            if (length_horizontal > 0): #Be rong mang gia tri duong
-                if (motion_pixels > 22000 and (length_vertical < length_horizontal and length_horizontal - length_vertical <= 150)):
+            if length_horizontal > 0:
+                if threshold > 0.01 and (length_vertical < length_horizontal and length_horizontal - length_vertical <= 150):
                     if not alert:
-                        # Bắt đầu cảnh báo
                         alert = True
                 else:
-                    # Đặt lại biến cảnh báo và trạng thái phát hiện té ngã nếu chiều cao > chiều rộng
                     alert = False
                     fall_detect = False
 
-                # Hiển thị thông báo nếu đang trong trạng thái cảnh báo
                 if alert:
-                    # In cảnh báo "Phát hiện Té ngã"
                     print("Fall Detect")
                     cv2.putText(big_frame, "Fall Detect", (x, y - 50),
                                 cv2.FONT_HERSHEY_PLAIN, font_scale, (0, 0, 255), font_thickness)
                     fall_detect = True
-            
-            if (length_horizontal < 0): #Be rong mang gia tri am
-                if (motion_pixels > 22000 and length_vertical + length_horizontal <= 380):
+                    
+            if length_horizontal < 0:
+                if threshold > 0.01 and length_vertical + length_horizontal <= 380:
                     if not alert:
-                        # Bắt đầu cảnh báo
                         alert = True
                 else:
-                    # Đặt lại biến cảnh báo và trạng thái phát hiện té ngã nếu chiều cao > chiều rộng
                     alert = False
                     fall_detect = False
 
-                # Hiển thị thông báo nếu đang trong trạng thái cảnh báo
                 if alert:
-                    # In cảnh báo "Phát hiện Té ngã"
                     print("Fall Detect")
                     cv2.putText(big_frame, "Fall Detect", (x, y - 50),
                                 cv2.FONT_HERSHEY_PLAIN, font_scale, (0, 0, 255), font_thickness)
                     fall_detect = True
 
-        if not ret:  # Kiểm tra khung hình rỗng
+        if not ret:
             print("Khung hình rỗng")
-            break            
+            break
+        
+        
+        # Cập nhật biểu đồ trong thời gian thực
+        ax.clear()
+        ax.plot(time_list, motion_pixels_list, 'b-')
+        ax.set_xlabel('Thời gian (s)')
+        ax.set_ylabel('Số điểm ảnh')
+        ax.set_title('Biểu đồ động số điểm ảnh theo thời gian')
+        current_time = (cv2.getTickCount() - start_time) / cv2.getTickFrequency()
+        if current_time > 10:
+            ax.set_xlim(current_time - 10, current_time)
+        ax.set_ylim(0, 307200)
+        plt.gca().set_xticks([])
+        plt.pause(0.01)
 
-        fps, frame1 = fpsReader.update(frame1, pos=(10, 30), color=(0, 255, 0), scale=2, thickness=3)    
-
+        #Chỉnh sửa độ phân giải
         frame_ratio = frame1.shape[1] / frame1.shape[0]
         new_width = 520   
         new_height = int(new_width / frame_ratio)
         frame1 = cv2.resize(frame1, (new_width, new_height))
 
-        # Chuyển đổi khung hình thành ảnh màu để hiển thị
         colorDiff_colored = cv2.cvtColor(colorDiff, cv2.COLOR_GRAY2BGR)
 
-        # Tạo layout cho các giao diện
         frame1_resized = cv2.resize(frame1, (new_width, new_height))
         big_frame_resized = cv2.resize(big_frame, (new_width, new_height))
         colorDiff_resized = cv2.resize(colorDiff_colored, (new_width, new_height))
 
-        # Kết hợp tất cả các giao diện cùng một hàng ngang
         combined_row = cv2.hconcat([frame1_resized, big_frame_resized, colorDiff_resized])
         
-        cv2.imshow("Combined Interfaces", combined_row)  # Hiển thị giao diện kết hợp
-
-        if cv2.waitKey(1) == 27:  # Thoát nếu nhấn phím ESC
-            break
-        # Vẽ biểu đồ động
-        plt.clf()  # Xóa biểu đồ trước khi vẽ lại
-        plt.plot(time_list, motion_pixels_list, 'b-')
-        plt.xlabel('Thời gian (s)')
-        plt.ylabel('Số điểm ảnh')
-        plt.title('Biểu đồ động số điểm ảnh theo thời gian')
-
-        # Tính toán giới hạn x cho biểu đồ
-        if current_time > 10:
-            plt.xlim(current_time - 10, current_time)
-        
-        # Đặt giới hạn trục tung từ 0 đến 40000
-        plt.ylim(0, 60000)
-        
-        # Đặt giá trị trống cho trục ngang
-        plt.gca().set_xticks([])
-
-        plt.pause(0.01)
-        
         await asyncio.sleep(0)       
+        
+        cv2.imshow("Combined Interfaces", combined_row)
 
-# Khởi tạo event loop asyncio
+        if cv2.waitKey(1) == 27:
+            break
+
+
 loop = asyncio.get_event_loop()
 
-# Bắt đầu chạy luồng xử lý chuyển động và cập nhật biểu đồ
 loop.run_until_complete(process_frames())
 
 cap.release()
